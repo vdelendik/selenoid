@@ -148,7 +148,11 @@ func GetS3Key(keyPattern string, createdFile event.CreatedFile) string {
 	key = strings.Replace(key, "$platformName", strings.ToLower(sess.Caps.Platform), -1)
 	key = strings.Replace(key, "$quota", strings.ToLower(sess.Quota), -1)
 	key = strings.Replace(key, "$sessionId", createdFile.SessionId, -1)
-	key = strings.Replace(key, "$fileType", strings.ToLower(createdFile.Type), -1)
+	fileType := strings.ToLower(createdFile.Type)
+	if ("log" == fileType) {
+		fileType = "session"
+	}
+	key = strings.Replace(key, "$fileType", fileType, -1)
 	key = strings.Replace(key, "$date", time.Now().Format("2006-01-02"), -1)
 	key = strings.Replace(key, " ", "-", -1)
 	return key
