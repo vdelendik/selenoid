@@ -3,26 +3,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/mafredri/cdp"
-	"github.com/mafredri/cdp/rpcc"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/aerokube/selenoid/config"
-
-	"encoding/json"
-	"path/filepath"
-
 	. "github.com/aandryashin/matchers"
 	. "github.com/aandryashin/matchers/httpresp"
 	ggr "github.com/aerokube/ggr/config"
+	"github.com/aerokube/selenoid/config"
+	"github.com/mafredri/cdp"
+	"github.com/mafredri/cdp/rpcc"
 )
 
 var _ = func() bool {
@@ -36,8 +34,8 @@ var (
 
 func init() {
 	enableFileUpload = true
-	videoOutputDir, _ = ioutil.TempDir("", "selenoid-test")
-	logOutputDir, _ = ioutil.TempDir("", "selenoid-test")
+	videoOutputDir, _ = os.MkdirTemp("", "selenoid-test")
+	logOutputDir, _ = os.MkdirTemp("", "selenoid-test")
 	saveAllLogs = true
 	gitRevision = "test-revision"
 	ggrHost = &ggr.Host{
@@ -304,6 +302,30 @@ func TestSessionCreatedWdHub(t *testing.T) {
 	queue.Release()
 }
 
+func TestSessionWithContentTypeCreatedWdHub(t *testing.T) {
+	root := http.NewServeMux()
+	root.Handle("/wd/hub/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/wd/hub")
+		AssertThat(t, r.Header.Get("Content-Type"), Is{"application/json; charset=utf-8"})
+		Selenium().ServeHTTP(w, r)
+	}))
+	manager = &HTTPTest{Handler: root}
+
+	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "application/json; charset=utf-8", bytes.NewReader([]byte("{}")))
+	AssertThat(t, err, Is{nil})
+	var sess map[string]string
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
+
+	resp, err = http.Get(With(srv.URL).Path("/status"))
+	AssertThat(t, err, Is{nil})
+	var state config.State
+	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&state}})
+	AssertThat(t, state.Used, EqualTo{1})
+	AssertThat(t, queue.Used(), EqualTo{1})
+	sessions.Remove(sess["sessionId"])
+	queue.Release()
+}
+
 func TestSessionFailedAfterTimeout(t *testing.T) {
 	newSessionAttemptTimeout = 10 * time.Millisecond
 	manager = &HTTPTest{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -388,6 +410,41 @@ func TestSessionCreatedRedirect(t *testing.T) {
 	AssertThat(t, queue.Used(), EqualTo{1})
 	sessions.Remove(sid)
 	queue.Release()
+}
+
+func TestSessionCreatedRemoveExtensionCapabilities(t *testing.T) {
+	desiredCapabilitiesPresent := true
+	alwaysMatchPresent := true
+	firstMatchPresent := true
+	chromeOptionsPresent := true
+
+	var browser struct {
+		Caps    map[string]interface{} `json:"desiredCapabilities"`
+		W3CCaps struct {
+			AlwaysMatch map[string]interface{}   `json:"alwaysMatch"`
+			FirstMatch  []map[string]interface{} `json:"firstMatch"`
+		} `json:"capabilities"`
+	}
+
+	root := http.NewServeMux()
+	root.Handle("/wd/hub/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&browser)
+		AssertThat(t, err, Is{nil})
+		_, desiredCapabilitiesPresent = browser.Caps["selenoid:options"]
+		_, alwaysMatchPresent = browser.W3CCaps.AlwaysMatch["selenoid:options"]
+		_, chromeOptionsPresent = browser.W3CCaps.AlwaysMatch["goog:chromeOptions"]
+		AssertThat(t, len(browser.W3CCaps.FirstMatch), EqualTo{1})
+		_, firstMatchPresent = browser.W3CCaps.FirstMatch[0]["selenoid:options"]
+	}))
+	manager = &HTTPTest{Handler: root}
+
+	resp, err := httpClient.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte(`{"desiredCapabilities": {"browserName": "chrome", "selenoid:options": {"enableVNC": true}}, "capabilities":{"alwaysMatch":{"browserName": "chrome", "goog:chromeOptions": {"args": ["headless"]}, "selenoid:options":{"enableVNC": true}}, "firstMatch": [{"platform": "linux", "selenoid:options": {"enableVideo": true}}]}}`)))
+	AssertThat(t, err, Is{nil})
+	AssertThat(t, resp, Code{http.StatusOK})
+	AssertThat(t, desiredCapabilitiesPresent, Is{false})
+	AssertThat(t, alwaysMatchPresent, Is{false})
+	AssertThat(t, chromeOptionsPresent, Is{true})
+	AssertThat(t, firstMatchPresent, Is{false})
 }
 
 func TestProxySession(t *testing.T) {
@@ -595,7 +652,7 @@ func TestFileUpload(t *testing.T) {
 	f, err := os.Open(jsonResponse["value"])
 	AssertThat(t, err, Is{nil})
 
-	content, err := ioutil.ReadAll(f)
+	content, err := io.ReadAll(f)
 	AssertThat(t, err, Is{nil})
 
 	AssertThat(t, string(content), EqualTo{"Hello World!"})
@@ -663,7 +720,7 @@ func TestPing(t *testing.T) {
 	AssertThat(t, rsp.Body, Is{Not{nil}})
 
 	var data map[string]interface{}
-	bt, readErr := ioutil.ReadAll(rsp.Body)
+	bt, readErr := io.ReadAll(rsp.Body)
 	AssertThat(t, readErr, Is{nil})
 	jsonErr := json.Unmarshal(bt, &data)
 	AssertThat(t, jsonErr, Is{nil})
@@ -686,7 +743,7 @@ func TestStatus(t *testing.T) {
 	AssertThat(t, rsp.Body, Is{Not{nil}})
 
 	var data map[string]interface{}
-	bt, readErr := ioutil.ReadAll(rsp.Body)
+	bt, readErr := io.ReadAll(rsp.Body)
 	AssertThat(t, readErr, Is{nil})
 	jsonErr := json.Unmarshal(bt, &data)
 	AssertThat(t, jsonErr, Is{nil})
@@ -703,7 +760,7 @@ func TestStatus(t *testing.T) {
 func TestServeAndDeleteVideoFile(t *testing.T) {
 	fileName := "testfile"
 	filePath := filepath.Join(videoOutputDir, fileName)
-	ioutil.WriteFile(filePath, []byte("test-data"), 0644)
+	os.WriteFile(filePath, []byte("test-data"), 0644)
 
 	rsp, err := http.Get(With(srv.URL).Path("/video/testfile"))
 	AssertThat(t, err, Is{nil})
@@ -730,7 +787,7 @@ func TestServeAndDeleteVideoFile(t *testing.T) {
 func TestServeAndDeleteLogFile(t *testing.T) {
 	fileName := "logfile.log"
 	filePath := filepath.Join(logOutputDir, fileName)
-	ioutil.WriteFile(filePath, []byte("test-data"), 0644)
+	os.WriteFile(filePath, []byte("test-data"), 0644)
 
 	rsp, err := http.Get(With(srv.URL).Path("/logs/logfile.log"))
 	AssertThat(t, err, Is{nil})
@@ -754,6 +811,18 @@ func TestServeAndDeleteLogFile(t *testing.T) {
 }
 
 func TestFileDownload(t *testing.T) {
+	testFileDownload(t, func(sessionId string) string {
+		return fmt.Sprintf("/download/%s/testfile", sessionId)
+	})
+}
+
+func TestFileDownloadProtocolExtension(t *testing.T) {
+	testFileDownload(t, func(sessionId string) string {
+		return fmt.Sprintf("/wd/hub/session/%s/aerokube/download/testfile", sessionId)
+	})
+}
+
+func testFileDownload(t *testing.T, path func(string) string) {
 	manager = &HTTPTest{Handler: Selenium()}
 
 	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte("{}")))
@@ -762,10 +831,10 @@ func TestFileDownload(t *testing.T) {
 	var sess map[string]string
 	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
 
-	rsp, err := http.Get(With(srv.URL).Path(fmt.Sprintf("/download/%s/testfile", sess["sessionId"])))
+	rsp, err := http.Get(With(srv.URL).Path(path(sess["sessionId"])))
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusOK})
-	data, err := ioutil.ReadAll(rsp.Body)
+	data, err := io.ReadAll(rsp.Body)
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, string(data), EqualTo{"test-data"})
 
@@ -780,6 +849,18 @@ func TestFileDownloadMissingSession(t *testing.T) {
 }
 
 func TestClipboard(t *testing.T) {
+	testClipboard(t, func(sessionId string) string {
+		return fmt.Sprintf("/clipboard/%s", sessionId)
+	})
+}
+
+func TestClipboardProtocolExtension(t *testing.T) {
+	testClipboard(t, func(sessionId string) string {
+		return fmt.Sprintf("/wd/hub/session/%s/aerokube/clipboard", sessionId)
+	})
+}
+
+func testClipboard(t *testing.T, path func(string) string) {
 	manager = &HTTPTest{Handler: Selenium()}
 
 	resp, err := http.Post(With(srv.URL).Path("/wd/hub/session"), "", bytes.NewReader([]byte("{}")))
@@ -788,14 +869,14 @@ func TestClipboard(t *testing.T) {
 	var sess map[string]string
 	AssertThat(t, resp, AllOf{Code{http.StatusOK}, IsJson{&sess}})
 
-	rsp, err := http.Get(With(srv.URL).Path(fmt.Sprintf("/clipboard/%s", sess["sessionId"])))
+	rsp, err := http.Get(With(srv.URL).Path(path(sess["sessionId"])))
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusOK})
-	data, err := ioutil.ReadAll(rsp.Body)
+	data, err := io.ReadAll(rsp.Body)
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, string(data), EqualTo{"test-clipboard-value"})
 
-	rsp, err = http.Post(With(srv.URL).Path(fmt.Sprintf("/clipboard/%s", sess["sessionId"])), "text/plain", bytes.NewReader([]byte("any-data")))
+	rsp, err = http.Post(With(srv.URL).Path(path(sess["sessionId"])), "text/plain", bytes.NewReader([]byte("any-data")))
 	AssertThat(t, err, Is{nil})
 	AssertThat(t, rsp, Code{http.StatusOK})
 

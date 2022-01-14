@@ -4,25 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"golang.org/x/net/websocket"
-
-	"fmt"
-
-	"path/filepath"
-
 	ggr "github.com/aerokube/ggr/config"
 	"github.com/aerokube/selenoid/config"
+	"github.com/aerokube/selenoid/jsonerror"
 	"github.com/aerokube/selenoid/protect"
 	"github.com/aerokube/selenoid/service"
 	"github.com/aerokube/selenoid/session"
@@ -30,6 +27,8 @@ import (
 	"github.com/aerokube/util"
 	"github.com/aerokube/util/docker"
 	"github.com/docker/docker/client"
+	"github.com/pkg/errors"
+	"golang.org/x/net/websocket"
 )
 
 var (
@@ -329,7 +328,7 @@ func handler() http.Handler {
 		selenium().ServeHTTP(w, r)
 	})
 	root.HandleFunc(paths.Error, func(w http.ResponseWriter, r *http.Request) {
-		util.JsonError(w, "Session timed out or not found", http.StatusNotFound)
+		jsonerror.InvalidSessionID(errors.New("session timed out or not found")).Encode(w)
 	})
 	root.HandleFunc(paths.Status, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/json")
