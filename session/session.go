@@ -75,6 +75,7 @@ type Session struct {
 	URL       *url.URL
 	Container *Container
 	HostPort  HostPort
+	Origin    string
 	Cancel    func()
 	Timeout   time.Duration
 	TimeoutCh chan struct{}
